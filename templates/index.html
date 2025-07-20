@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Датчик расстояния</title>
+</head>
+<body>
+  <h1>Расстояние с Arduino:</h1>
+  <div id="distance">Загрузка...</div>
+
+  <script>
+async function updateDistance() {
+    try {
+      const response = await fetch('/data');
+      const data = await response.json();
+      const dist = data.distance;
+      if (dist !== null && !isNaN(dist)) {
+        document.getElementById('distance').textContent = dist + " см";
+      } else {
+        document.getElementById('distance').textContent = "Нет валидных данных";
+      }
+    } catch (error) {
+      console.error('Error fetching data:', error);
+      document.getElementById('distance').textContent = "Ошибка загрузки";
+    }
+  }
+  setInterval(updateDistance, 1000);
+  updateDistance();
+</script>
+</body>
+</html>
