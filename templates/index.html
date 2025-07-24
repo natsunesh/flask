@@ -2,29 +2,55 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>Радар на странице</title>
+  <title>радар</title>
   <style>
     body {
       background: #000;
       color: #0f0;
       font-family: monospace;
-      text-align: center;
-      margin: 0;
-      padding: 0;
+      margin: 0; padding: 0;
       user-select: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 {
+      margin: 15px 0;
+    }
+    #radarWrapper {
+      position: relative;
+      width: 400px;
+      height: 400px;
     }
     canvas {
-      background: #111;
-      display: block;
-      margin: 20px auto;
+      background: radial-gradient(circle, #111 0%, #000 100%);
       border: 2px solid #0f0;
       border-radius: 50%;
+      display: block;
+    }
+    #distanceDisplay {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #0f0;
+      font-size: 16px;
+      font-weight: bold;
+      background-color: rgba(0,0,0,0.5);
+      padding: 2px 6px;
+      border-radius: 4px;
+      pointer-events: none;
+      user-select: none;
+      font-family: monospace;
     }
   </style>
 </head>
 <body>
-  <h1>Радар на Arduino</h1>
-  <canvas id="radar" width="400" height="400"></canvas>
+  <h1>Профессиональный азимутальный радар</h1>
+  <div id="radarWrapper">
+    <canvas id="radar" width="400" height="400"></canvas>
+    <div id="distanceDisplay">Расстояние: -- см</div>
+  </div>
 
   <script>
     const canvas = document.getElementById('radar');
@@ -32,202 +58,282 @@
     const centerX = canvas.width / 2;
     const centerY = canvas.height / 2;
     const radius = 180;
-    const maxDistance = 70; // Максимальная дальность
+    const maxDistance = 70;
 
-    let scanPoints = [];
-    let lastUpdateTimes = new Map();
-    const FADE_DURATION = 1500; // мс
-    let currentAngle = 0;
-    let latestData = null;
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = canvas.width;
+    offscreenCanvas.height = canvas.height;
+    const offscreenCtx = offscreenCanvas.getContext('2d');
 
-    // Отрисовка фона радара — концентрические круги и линии с подписями
+    const FADE_DURATION = 1500;
+    const distanceDisplay = document.getElementById("distanceDisplay");
+
+    let currentAngle = 0; // Плавный угол луча
+    let targetAngle = 0;  // Целевой угол по данным
+
+    const scanPointsMap = new Map();
+    const lastUpdateTimes = new Map();
+
+    function toRadians(deg) { return deg * Math.PI / 180; }
+
+    function getAzimuthalXY(angle, distPx) {
+      const rad = toRadians(angle);
+      const x = centerX + distPx * Math.sin(rad);
+      const y = centerY - distPx * Math.cos(rad);
+      return { x: Math.round(x), y: Math.round(y) };
+    }
+
+    // Шкала с рисками и метками
     function drawRadarBackground() {
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      offscreenCtx.fillStyle = '#000';
+      offscreenCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
 
-      ctx.strokeStyle = '#0f0';
-      ctx.lineWidth = 1;
-      ctx.font = '12px monospace';
-      ctx.fillStyle = '#0f0';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
+      // Добавим имитацию шума - мелкие полупрозрачные точки
+      for (let i = 0; i < 300; i++) {
+        offscreenCtx.fillStyle = `rgba(0, 255, 0, ${Math.random() * 0.03})`;
+        offscreenCtx.beginPath();
+        offscreenCtx.arc(Math.random()*canvas.width, Math.random()*canvas.height, 1, 0, 2 * Math.PI);
+        offscreenCtx.fill();
+      }
 
+      offscreenCtx.strokeStyle = '#0f0';
+      offscreenCtx.lineWidth = 1;
+      offscreenCtx.font = '12px monospace';
+      offscreenCtx.fillStyle = '#0f0';
+
+      // Круги с рисками и цифрами
+      let labelCount = 0;
       for (let r = 30; r <= radius; r += 30) {
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, r, 0, 2 * Math.PI);
-        ctx.stroke();
+        offscreenCtx.beginPath();
+        offscreenCtx.arc(centerX, centerY, r, 0, 2*Math.PI);
+        offscreenCtx.stroke();
 
-        let distLabel = Math.round((r / radius) * maxDistance);
-        if (distLabel > 0 && distLabel <= maxDistance) {
-          ctx.fillText(distLabel + ' см', centerX, centerY - r - 10);
+        // Риски - 12 штук на круг (каждые 30°)
+        for(let a=0; a<360; a+=30) {
+          const outer = getAzimuthalXY(a, r + 5);
+          const inner = getAzimuthalXY(a, r - 5);
+          offscreenCtx.beginPath();
+          offscreenCtx.moveTo(inner.x, inner.y);
+          offscreenCtx.lineTo(outer.x, outer.y);
+          offscreenCtx.stroke();
+        }
+
+        const distLabel = Math.round((r / radius) * maxDistance);
+        if(distLabel > 0 && distLabel <= maxDistance) {
+          const verticalShift = (labelCount % 2 === 0) ? -12 : 12;
+          offscreenCtx.textAlign = 'left';
+          offscreenCtx.textBaseline = 'middle';
+          offscreenCtx.fillText(distLabel + ' см', centerX + r + 8, centerY + verticalShift);
+          labelCount++;
         }
       }
 
-      for (let angle = 0; angle < 360; angle += 30) {
-        let rad = (angle * Math.PI) / 180;
-        let x = centerX + radius * Math.cos(rad);
-        let y = centerY + radius * Math.sin(rad);
-        ctx.beginPath();
-        ctx.moveTo(centerX, centerY);
-        ctx.lineTo(x, y);
-        ctx.stroke();
+      // Угловые линии и крупные метки углов
+      for(let angle=0; angle<360; angle+=30) {
+        const lineEnd = getAzimuthalXY(angle, radius);
+        offscreenCtx.beginPath();
+        offscreenCtx.moveTo(centerX, centerY);
+        offscreenCtx.lineTo(lineEnd.x, lineEnd.y);
+        offscreenCtx.stroke();
 
-        let labelRadius = radius + 15;
-        let lx = centerX + labelRadius * Math.cos(rad);
-        let ly = centerY + labelRadius * Math.sin(rad);
+        const labelOffset = 30;
+        const labelPos = getAzimuthalXY(angle, radius + labelOffset);
 
-        if (angle === 0) ctx.textAlign = 'center';
-        else if (angle < 180) ctx.textAlign = 'left';
-        else ctx.textAlign = 'right';
+        // Выравнивание текста
+        const isTop = angle === 0;
+        const isBottom = angle === 180;
+        const isSide = angle === 90 || angle === 270;
 
-        if (angle === 90) ctx.textBaseline = 'top';
-        else if (angle === 270) ctx.textBaseline = 'bottom';
-        else ctx.textBaseline = 'middle';
+        offscreenCtx.textAlign = (angle === 0 || angle === 180) ? 'center' : (angle < 180 ? 'left' : 'right');
+        offscreenCtx.textBaseline = isSide ? 'middle' : (angle < 180 ? 'top' : 'bottom');
 
-        ctx.fillText(angle + '°', lx, ly);
+        if(isTop) offscreenCtx.textBaseline = 'bottom';
+        if(isBottom) offscreenCtx.textBaseline = 'top';
+
+        // Крупные метки углов жирным шрифтом
+        offscreenCtx.font = "bold 14px monospace";
+        offscreenCtx.fillText(angle + "°", labelPos.x, labelPos.y);
+        offscreenCtx.font = "12px monospace";
       }
+
+      // Центральный ретикулум — крест из нитей
+      offscreenCtx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+      offscreenCtx.lineWidth = 1;
+      offscreenCtx.beginPath();
+      // Вертикальная линия
+      offscreenCtx.moveTo(centerX, centerY-20);
+      offscreenCtx.lineTo(centerX, centerY+20);
+      // Горизонтальная линия
+      offscreenCtx.moveTo(centerX-20, centerY);
+      offscreenCtx.lineTo(centerX+20, centerY);
+      offscreenCtx.stroke();
+
+      // Центральный круглый маркер с мягким свечением
+      const gradient = offscreenCtx.createRadialGradient(centerX, centerY, 0, centerX, centerY, 12);
+      gradient.addColorStop(0, '#0f0');
+      gradient.addColorStop(1, 'transparent');
+      offscreenCtx.fillStyle = gradient;
+      offscreenCtx.beginPath();
+      offscreenCtx.arc(centerX, centerY, 12, 0, 2*Math.PI);
+      offscreenCtx.fill();
     }
+    drawRadarBackground();
 
+    // Градиентный луч
     function drawRadarBeam(angle) {
-      const beamWidth = 5 * Math.PI / 180;
-      const startAngle = ((angle - 90) * Math.PI / 180) - beamWidth / 2;
-      const endAngle = startAngle + beamWidth;
+      const beamWidth = 5; 
+      const startAngle = angle - beamWidth / 2;
+      const endAngle = angle + beamWidth / 2;
 
-      ctx.fillStyle = 'rgba(0,255,0,0.15)';
+      const grad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+      grad.addColorStop(0, 'rgba(0,255,0,0.6)');
+      grad.addColorStop(1, 'rgba(0,255,0,0)');
+
+      ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.moveTo(centerX, centerY);
-      ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+      ctx.arc(centerX, centerY, radius, toRadians(90 - endAngle), toRadians(90 - startAngle), true);
       ctx.closePath();
       ctx.fill();
     }
 
-    function drawScanPoints(points) {
+    // Мерцание точек — небольшие случайные изменения прозрачности и размера
+    function drawScanPoints() {
       ctx.shadowColor = '#0f0';
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = 8;
       const now = Date.now();
 
-      // Создаем новый массив без устаревших точек, чтобы не мутировать в цикле
-      const filteredPoints = [];
-      for (const pt of points) {
-        if (pt.distance <= 0) continue;
-        const key = `${pt.angle}_${pt.distance_raw}`;
-        let lastTime = lastUpdateTimes.get(key) || now;
-        const elapsed = now - lastTime;
-
-        if (elapsed > FADE_DURATION) {
-          // Точка устарела — удаляем из времени и не добавляем в новый массив
-          lastUpdateTimes.delete(key);
-          continue;
-        }
-
-        filteredPoints.push(pt);
-        let opacity = 1 - (elapsed / FADE_DURATION);
-        if (opacity < 0) opacity = 0;
-
-        let dist = pt.distance > maxDistance ? maxDistance : pt.distance;
-        let rad = (pt.angle - 90) * Math.PI / 180;
-        let r = (dist / maxDistance) * radius;
-        let x = centerX + r * Math.cos(rad);
-        let y = centerY + r * Math.sin(rad);
-
-        ctx.fillStyle = `rgba(0,255,0,${opacity.toFixed(2)})`;
-        ctx.beginPath();
-        ctx.arc(x, y, 5, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-
-      // Обновляем массив точек глобально
-      scanPoints = filteredPoints;
-    }
-
-    function drawContour(points) {
-      if (points.length < 2) return;
-
-      const visiblePoints = points.filter(pt => pt.distance > 0 && pt.distance <= maxDistance);
-      if (visiblePoints.length < 2) return;
-
-      visiblePoints.sort((a, b) => a.angle - b.angle);
-      ctx.lineWidth = 2;
-      ctx.shadowColor = '#0f0';
-      ctx.shadowBlur = 15;
-
-      ctx.beginPath();
-
-      const now = Date.now();
-      for (let i = 0; i < visiblePoints.length; i++) {
-        const pt = visiblePoints[i];
-        const key = `${pt.angle}_${pt.distance_raw}`;
+      for(const [key, pt] of scanPointsMap.entries()) {
         const lastTime = lastUpdateTimes.get(key) || now;
         const elapsed = now - lastTime;
-        let opacity = 1 - (elapsed / FADE_DURATION);
-        if (opacity < 0.1) opacity = 0.1;
+        let baseOpacity = 1 - (elapsed/FADE_DURATION);
+        if(baseOpacity < 0) baseOpacity = 0;
 
-        ctx.strokeStyle = `rgba(0,255,0,${opacity.toFixed(2)})`;
+        // Мерцание
+        const flicker = 0.7 + 0.3 * Math.random();
 
-        let dist = pt.distance > maxDistance ? maxDistance : pt.distance;
-        let rad = (pt.angle - 90) * Math.PI / 180;
-        let r = (dist / maxDistance) * radius;
-        let x = centerX + r * Math.cos(rad);
-        let y = centerY + r * Math.sin(rad);
+        let opacity = baseOpacity * flicker;
+        let dist = Math.min(pt.distance, maxDistance);
+        let distPx = (dist / maxDistance) * radius;
+        const {x,y} = getAzimuthalXY(pt.angle, distPx);
 
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        // Колебания радиуса для живости
+        const radiusFlicker = 4 + Math.random() * 2;
+
+        ctx.fillStyle = `rgba(0, 255, 0, ${opacity.toFixed(2)})`;
+        ctx.beginPath();
+        ctx.arc(x, y, radiusFlicker, 0, 2*Math.PI);
+        ctx.fill();
       }
-
-      ctx.stroke();
-    }
-
-    function clearCanvas() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.shadowBlur = 0;
     }
 
-    // Функция для запроса данных с интервалом 300мс
-    async function fetchDataPeriodically() {
-      try {
-        const response = await fetch('/data');
-        if (!response.ok) throw new Error(`HTTP ошибка ${response.status}`);
+    // Контур точек - с плавной прозрачностью
+    function drawContour() {
+      const points = Array.from(scanPointsMap.values()).filter(pt => pt.distance > 0 && pt.distance <= maxDistance);
+      if(points.length < 2) return;
+      points.sort((a,b) => a.angle - b.angle);
 
-        const data = await response.json();
-        if (data.angle !== null && data.distance !== null) {
-          currentAngle = data.angle;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#0f0';
+      ctx.shadowBlur = 10;
+      ctx.strokeStyle = '#0f0';
 
-          const key = `${data.angle}_${data.distance}`;
-          const existingIndex = scanPoints.findIndex(p => p.angle === data.angle && p.distance_raw === data.distance);
-          const now = Date.now();
+      ctx.beginPath();
+      const now = Date.now();
+      points.forEach((pt,i) => {
+        const key = pt.angle.toFixed(1);
+        const lastTime = lastUpdateTimes.get(key) || now;
+        const elapsed = now - lastTime;
+        let opacity = 1 - (elapsed / FADE_DURATION);
+        if(opacity < 0.1) opacity = 0.1;
+        ctx.strokeStyle = `rgba(0,255,0,${opacity.toFixed(2)})`;
 
-          if (existingIndex === -1) {
-            scanPoints.push({ angle: data.angle, distance: data.distance, distance_raw: data.distance });
-            lastUpdateTimes.set(key, now);
-          } else {
-            lastUpdateTimes.set(key, now);
-            // Обновим расстояние на всякий случай (для плавности)
-            scanPoints[existingIndex].distance = data.distance;
-          }
+        let dist = Math.min(pt.distance, maxDistance);
+        let distPx = (dist / maxDistance) * radius;
+        const {x,y} = getAzimuthalXY(pt.angle, distPx);
+
+        if(i === 0) ctx.moveTo(x,y);
+        else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    function clearAndDrawBackground() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(offscreenCanvas, 0, 0);
+    }
+
+    function updateScanPoints() {
+      const now = Date.now();
+      for(const [key, lastTime] of lastUpdateTimes.entries()) {
+        if(now - lastTime > FADE_DURATION) {
+          scanPointsMap.delete(key);
+          lastUpdateTimes.delete(key);
         }
-      } catch (error) {
-        console.error('Ошибка при получении данных:', error);
       }
     }
 
-    // Главная функция отрисовки — вызывается как можно чаще
+    let scanSpeed = 1.5; // скорость вращения луча°/кадр
+
+    function smoothAngleUpdate() {
+      const diff = ((targetAngle - currentAngle + 540) % 360) - 180;
+      const maxStep = scanSpeed;
+      if(Math.abs(diff) < maxStep) currentAngle = targetAngle;
+      else currentAngle = (currentAngle + Math.sign(diff) * maxStep + 360) % 360;
+    }
+
+    let currentDistance = null;
+
+    async function fetchDataPeriodically() {
+      try {
+        const response = await fetch('/data');
+        if(!response.ok) throw new Error(`HTTP ошибка ${response.status}`);
+        const data = await response.json();
+
+        if(data.angle !== null && data.distance !== null) {
+          if(typeof data.angle === "number" && typeof data.distance === "number" &&
+            data.angle >= 0 && data.angle <= 180 &&
+            data.distance > 0 && data.distance <= maxDistance) {
+
+            azimuthAngle = data.angle; 
+            targetAngle = azimuthAngle;
+            currentDistance = data.distance;
+
+            const key = azimuthAngle.toFixed(1);
+            scanPointsMap.set(key, {angle: azimuthAngle, distance: data.distance, distance_raw: data.distance});
+            lastUpdateTimes.set(key, Date.now());
+          } else {
+            console.warn("Некорректные данные:", data);
+          }
+        }
+      } catch(e) {
+        console.error("Ошибка получения данных:", e);
+      }
+    }
+
+    function updateDistanceDisplay() {
+      distanceDisplay.textContent = currentDistance !== null ? `Расстояние: ${currentDistance} см` : `Расстояние: -- см`;
+    }
+
     function animate() {
-      clearCanvas();
-      drawRadarBackground();
-      drawScanPoints(scanPoints);
-      drawContour(scanPoints);
+      clearAndDrawBackground();
+      smoothAngleUpdate();
+      drawScanPoints();
+      drawContour();
       drawRadarBeam(currentAngle);
+      updateDistanceDisplay();
       requestAnimationFrame(animate);
     }
 
-    // Запускаем
     window.onload = () => {
-      // Запускаем анимацию
       animate();
-      // Запускаем опрос данных каждые 300 мс
-      setInterval(fetchDataPeriodically, 300);
-    };
-
+      setInterval(() => {
+        fetchDataPeriodically();
+        updateScanPoints();
+      }, 300);
+    }
   </script>
 </body>
 </html>

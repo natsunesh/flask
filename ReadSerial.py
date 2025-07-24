@@ -39,7 +39,7 @@ def read_serial():
                     print(f"Неверный формат данных: '{line}'")
             # else:
             #     pass  # пустая строка, можно игнорировать
-            time.sleep(0.05)
+            time.sleep(0.01)  # Уменьшаем время сна до 0.01 секунды
         except serial.SerialException as e:
             print(f"Ошибка чтения с порта: {e}")
             break
