@@ -10,8 +10,12 @@ def index():
 @main.route('/data')
 def data():
     dist = ReadSerial.latest_data
-    print(f'distance {dist}')
-    return jsonify({'distance': dist})
+    if dist:
+        angle, distance = dist
+        print(f'Получены данные: угол={angle}, расстояние={distance}')
+        return jsonify({'angle': angle, 'distance': distance})
+    else:
+        return jsonify({'angle': None, 'distance': None})
 
 
 

@@ -2,30 +2,232 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>Датчик расстояния</title>
+  <title>Радар на странице</title>
+  <style>
+    body {
+      background: #000;
+      color: #0f0;
+      font-family: monospace;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    canvas {
+      background: #111;
+      display: block;
+      margin: 20px auto;
+      border: 2px solid #0f0;
+      border-radius: 50%;
+    }
+  </style>
 </head>
 <body>
-  <h1>Расстояние с Arduino:</h1>
-  <div id="distance">Загрузка...</div>
+  <h1>Радар на Arduino</h1>
+  <canvas id="radar" width="400" height="400"></canvas>
 
   <script>
-async function updateDistance() {
-    try {
-      const response = await fetch('/data');
-      const data = await response.json();
-      const dist = data.distance;
-      if (dist !== null && !isNaN(dist)) {
-        document.getElementById('distance').textContent = dist + " см";
-      } else {
-        document.getElementById('distance').textContent = "Нет валидных данных";
+    const canvas = document.getElementById('radar');
+    const ctx = canvas.getContext('2d');
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    const radius = 180;
+    const maxDistance = 70; // Максимальная дальность
+
+    let scanPoints = [];
+    let lastUpdateTimes = new Map();
+    const FADE_DURATION = 1500; // мс
+    let currentAngle = 0;
+    let latestData = null;
+
+    // Отрисовка фона радара — концентрические круги и линии с подписями
+    function drawRadarBackground() {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = '#0f0';
+      ctx.lineWidth = 1;
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#0f0';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      for (let r = 30; r <= radius; r += 30) {
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, r, 0, 2 * Math.PI);
+        ctx.stroke();
+
+        let distLabel = Math.round((r / radius) * maxDistance);
+        if (distLabel > 0 && distLabel <= maxDistance) {
+          ctx.fillText(distLabel + ' см', centerX, centerY - r - 10);
+        }
       }
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      document.getElementById('distance').textContent = "Ошибка загрузки";
+
+      for (let angle = 0; angle < 360; angle += 30) {
+        let rad = (angle * Math.PI) / 180;
+        let x = centerX + radius * Math.cos(rad);
+        let y = centerY + radius * Math.sin(rad);
+        ctx.beginPath();
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+
+        let labelRadius = radius + 15;
+        let lx = centerX + labelRadius * Math.cos(rad);
+        let ly = centerY + labelRadius * Math.sin(rad);
+
+        if (angle === 0) ctx.textAlign = 'center';
+        else if (angle < 180) ctx.textAlign = 'left';
+        else ctx.textAlign = 'right';
+
+        if (angle === 90) ctx.textBaseline = 'top';
+        else if (angle === 270) ctx.textBaseline = 'bottom';
+        else ctx.textBaseline = 'middle';
+
+        ctx.fillText(angle + '°', lx, ly);
+      }
     }
-  }
-  setInterval(updateDistance, 1000);
-  updateDistance();
-</script>
+
+    function drawRadarBeam(angle) {
+      const beamWidth = 5 * Math.PI / 180;
+      const startAngle = ((angle - 90) * Math.PI / 180) - beamWidth / 2;
+      const endAngle = startAngle + beamWidth;
+
+      ctx.fillStyle = 'rgba(0,255,0,0.15)';
+      ctx.beginPath();
+      ctx.moveTo(centerX, centerY);
+      ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawScanPoints(points) {
+      ctx.shadowColor = '#0f0';
+      ctx.shadowBlur = 10;
+      const now = Date.now();
+
+      // Создаем новый массив без устаревших точек, чтобы не мутировать в цикле
+      const filteredPoints = [];
+      for (const pt of points) {
+        if (pt.distance <= 0) continue;
+        const key = `${pt.angle}_${pt.distance_raw}`;
+        let lastTime = lastUpdateTimes.get(key) || now;
+        const elapsed = now - lastTime;
+
+        if (elapsed > FADE_DURATION) {
+          // Точка устарела — удаляем из времени и не добавляем в новый массив
+          lastUpdateTimes.delete(key);
+          continue;
+        }
+
+        filteredPoints.push(pt);
+        let opacity = 1 - (elapsed / FADE_DURATION);
+        if (opacity < 0) opacity = 0;
+
+        let dist = pt.distance > maxDistance ? maxDistance : pt.distance;
+        let rad = (pt.angle - 90) * Math.PI / 180;
+        let r = (dist / maxDistance) * radius;
+        let x = centerX + r * Math.cos(rad);
+        let y = centerY + r * Math.sin(rad);
+
+        ctx.fillStyle = `rgba(0,255,0,${opacity.toFixed(2)})`;
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+
+      // Обновляем массив точек глобально
+      scanPoints = filteredPoints;
+    }
+
+    function drawContour(points) {
+      if (points.length < 2) return;
+
+      const visiblePoints = points.filter(pt => pt.distance > 0 && pt.distance <= maxDistance);
+      if (visiblePoints.length < 2) return;
+
+      visiblePoints.sort((a, b) => a.angle - b.angle);
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#0f0';
+      ctx.shadowBlur = 15;
+
+      ctx.beginPath();
+
+      const now = Date.now();
+      for (let i = 0; i < visiblePoints.length; i++) {
+        const pt = visiblePoints[i];
+        const key = `${pt.angle}_${pt.distance_raw}`;
+        const lastTime = lastUpdateTimes.get(key) || now;
+        const elapsed = now - lastTime;
+        let opacity = 1 - (elapsed / FADE_DURATION);
+        if (opacity < 0.1) opacity = 0.1;
+
+        ctx.strokeStyle = `rgba(0,255,0,${opacity.toFixed(2)})`;
+
+        let dist = pt.distance > maxDistance ? maxDistance : pt.distance;
+        let rad = (pt.angle - 90) * Math.PI / 180;
+        let r = (dist / maxDistance) * radius;
+        let x = centerX + r * Math.cos(rad);
+        let y = centerY + r * Math.sin(rad);
+
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+
+      ctx.stroke();
+    }
+
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.shadowBlur = 0;
+    }
+
+    // Функция для запроса данных с интервалом 300мс
+    async function fetchDataPeriodically() {
+      try {
+        const response = await fetch('/data');
+        if (!response.ok) throw new Error(`HTTP ошибка ${response.status}`);
+
+        const data = await response.json();
+        if (data.angle !== null && data.distance !== null) {
+          currentAngle = data.angle;
+
+          const key = `${data.angle}_${data.distance}`;
+          const existingIndex = scanPoints.findIndex(p => p.angle === data.angle && p.distance_raw === data.distance);
+          const now = Date.now();
+
+          if (existingIndex === -1) {
+            scanPoints.push({ angle: data.angle, distance: data.distance, distance_raw: data.distance });
+            lastUpdateTimes.set(key, now);
+          } else {
+            lastUpdateTimes.set(key, now);
+            // Обновим расстояние на всякий случай (для плавности)
+            scanPoints[existingIndex].distance = data.distance;
+          }
+        }
+      } catch (error) {
+        console.error('Ошибка при получении данных:', error);
+      }
+    }
+
+    // Главная функция отрисовки — вызывается как можно чаще
+    function animate() {
+      clearCanvas();
+      drawRadarBackground();
+      drawScanPoints(scanPoints);
+      drawContour(scanPoints);
+      drawRadarBeam(currentAngle);
+      requestAnimationFrame(animate);
+    }
+
+    // Запускаем
+    window.onload = () => {
+      // Запускаем анимацию
+      animate();
+      // Запускаем опрос данных каждые 300 мс
+      setInterval(fetchDataPeriodically, 300);
+    };
+
+  </script>
 </body>
 </html>
